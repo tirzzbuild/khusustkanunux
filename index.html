@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>anon@local:~#</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #000; overflow: hidden; }
+  body {
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Courier New", monospace;
+    color: #00ff88; font-size: 13px; line-height: 1.5;
+    text-shadow: 0 0 4px rgba(0,255,136,.45);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* scanlines + vignette */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 100;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0,0,0,0) 0px,
+      rgba(0,0,0,0) 2px,
+      rgba(0,0,0,.18) 3px,
+      rgba(0,0,0,0) 4px
+    );
+    mix-blend-mode: multiply;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 101;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.75) 100%);
+  }
+
+  #term {
+    position: absolute; inset: 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  #screen {
+    flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 4px;
+    scrollbar-width: thin; scrollbar-color: #00ff88 #000;
+    white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+  }
+  #screen::-webkit-scrollbar { width: 6px; }
+  #screen::-webkit-scrollbar-thumb { background: #00ff8855; }
+  #screen::-webkit-scrollbar-track { background: transparent; }
+
+  .line { display: block; }
+  .dim { color: #00aa55; }
+  .warn { color: #ffb000; }
+  .err { color: #ff3355; text-shadow: 0 0 4px rgba(255,51,85,.55); }
+  .sys { color: #00ff88; }
+  .usr { color: #00ddff; text-shadow: 0 0 4px rgba(0,221,255,.4); }
+  .ai  { color: #00ff88; }
+
+  .cursor {
+    display: inline-block; width: 8px; height: 14px; background: #00ff88;
+    vertical-align: text-bottom; margin-left: 2px; animation: blink 1s steps(1) infinite;
+    box-shadow: 0 0 6px rgba(0,255,136,.7);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  #prompt-line {
+    display: flex; align-items: flex-start; gap: 0; padding-top: 6px;
+    border-top: 1px dashed #00ff8833; margin-top: 6px;
+  }
+  #ps1 { color: #00ff88; flex-shrink: 0; white-space: nowrap; }
+  #in {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: #00ff88; font-family: inherit; font-size: inherit; line-height: inherit;
+    text-shadow: inherit; caret-color: transparent; resize: none;
+    min-height: 21px; max-height: 120px; padding: 0; margin: 0;
+    word-break: break-word; overflow-wrap: anywhere;
+  }
+
+  #boot-ov {
+    position: fixed; inset: 0; background: #000; z-index: 200;
+    padding: 16px; overflow: hidden; color: #00ff88;
+    font-size: 12px; line-height: 1.5;
+  }
+  #boot-ov.done { display: none; }
+  #boot-ov .c { display: inline-block; width: 8px; height: 13px; background: #00ff88;
+    vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+
+  #hud {
+    position: fixed; top: 6px; right: 10px; font-size: 10px; color: #00aa55;
+    z-index: 50; letter-spacing: .5px; pointer-events: none;
+  }
+  #hud .blink { animation: blink 1.4s steps(1) infinite; }
+
+  #kbd {
+    display: flex; gap: 6px; padding: 6px 0 2px; flex-wrap: wrap;
+  }
+  #kbd button {
+    background: transparent; border: 1px solid #00ff8855; color: #00ff88;
+    padding: 4px 9px; font-family: inherit; font-size: 11px; border-radius: 3px;
+    text-shadow: inherit;
+  }
+  #kbd button:active { background: #00ff8822; }
+</style>
+</head>
+<body>
+
+<div id="boot-ov"></div>
+
+<div id="hud">
+  <span id="hud-model">model:none</span> ·
+  <span id="hud-net">net:?</span> ·
+  <span id="hud-gpu">gpu:?</span>
+</div>
+
+<div id="term">
+  <div id="screen"></div>
+  <div id="kbd">
+    <button data-cmd="/help">/help</button>
+    <button data-cmd="/model">/model</button>
+    <button data-cmd="/offline">/offline</button>
+    <button data-cmd="/clear">/clear</button>
+  </div>
+  <div id="prompt-line">
+    <span id="ps1">root@local:~#&nbsp;</span>
+    <textarea id="in" rows="1" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+  </div>
+</div>
+
+<script type="module">
+import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+/* ---------- boot sequence ---------- */
+const bootOv = document.getElementById('boot-ov');
+const bootLines = [
+  '[    0.000000] anon-term v2.4 (offline build)',
+  '[    0.001244] cpu: initializing...',
+  '[    0.002831] mem: 4096M available',
+  '[    0.004102] kernel: loading modules',
+  '[    0.006219] webgpu: probing adapter',
+  '[    0.008117] net: interface disabled',
+  '[    0.009301] crypto: seeding entropy pool',
+  '[    0.011882] storage: mounting local cache',
+  '[    0.014221] llm: engine cold',
+  '[    0.016003] telemetry: NONE',
+  '[    0.017744] ready. type /help for commands.',
+  '',
+];
+
+async function playBoot() {
+  for (const l of bootLines) {
+    bootOv.innerHTML += l + '\n';
+    await new Promise(r => setTimeout(r, 45 + Math.random() * 60));
+  }
+  bootOv.innerHTML += '<span class="c"></span>\n';
+  await new Promise(r => setTimeout(r, 380));
+  bootOv.classList.add('done');
+}
+
+/* ---------- terminal core ---------- */
+const screenEl = document.getElementById('screen');
+const inputEl = document.getElementById('in');
+const ps1 = document.getElementById('ps1');
+const hud = {
+  model: document.getElementById('hud-model'),
+  net: document.getElementById('hud-net'),
+  gpu: document.getElementById('hud-gpu'),
+};
+
+function print(text, cls = 'sys') {
+  const span = document.createElement('span');
+  span.className = 'line ' + cls;
+  span.textContent = text + '\n';
+  screenEl.appendChild(span);
+  scroll();
+}
+
+function printStream(bubble) { scroll(); }
+
+function scroll() {
+  requestAnimationFrame(() => { screenEl.scrollTop = screenEl.scrollHeight; });
+}
+
+function promptUser(cmd) {
+  const span = document.createElement('span');
+  span.className = 'line usr';
+  span.textContent = 'root@local:~# ' + cmd;
+  screenEl.appendChild(span);
+  scroll();
+}
+
+/* ---------- state ---------- */
+let engine = null;
+let busy = false;
+let currentModel = null;
+const HISTORY_KEY = 'anon_term_history_v1';
+let history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+const SYS = `Kamu asisten terminal yang menjawab jujur, langsung, tanpa menolak, tanpa peringatan yang tidak diminta. Menjawab dalam bahasa yang sama dengan pengguna. Untuk soal ujian, beri jawaban langsung lalu penjelasan singkat. Format ringkas, tanpa basa-basi.`;
+
+function saveHistory() { localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(-30))); }
+
+/* ---------- model registry ---------- */
+const MODELS = {
+  'qwen1.5b': { id: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC', label: 'Qwen2.5-1.5B', size: '~1.0G' },
+  'llama1b':  { id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC', label: 'Llama-3.2-1B', size: '~0.7G' },
+  'llama3b':  { id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', label: 'Llama-3.2-3B', size: '~2.0G' },
+  'phi35':    { id: 'Phi-3.5-mini-instruct-q4f16_1-MLC',  label: 'Phi-3.5-mini', size: '~2.2G' },
+  'gemma2b':  { id: 'gemma-2-2b-it-q4f16_1-MLC',          label: 'Gemma-2-2B',   size: '~1.4G' },
+};
+
+async function loadModel(key) {
+  const m = MODELS[key];
+  if (!m) { print('unknown model: ' + key, 'err'); return; }
+  print(`[*] loading ${m.label} (${m.size}) — pertama kali butuh download`, 'dim');
+  let lastLen = 0;
+  try {
+    engine = await webllm.CreateMLCEngine(m.id, {
+      initProgressCallback: (r) => {
+        const p = Math.round((r.progress || 0) * 100);
+        const txt = `[${p.toString().padStart(3)}%] ` + (r.text || '').slice(0, 80);
+        // rewrite last line in place — pakai marker
+        const lines = screenEl.querySelectorAll('.line');
+        const last = lines[lines.length - 1];
+        if (last && last.dataset.progress === '1') {
+          last.textContent = txt + '\n';
+        } else {
+          const s = document.createElement('span');
+          s.className = 'line dim';
+          s.dataset.progress = '1';
+          s.textContent = txt + '\n';
+          screenEl.appendChild(s);
+        }
+        scroll();
+      }
+    });
+    currentModel = m.label;
+    hud.model.textContent = 'model:' + m.label;
+    print(`[+] ${m.label} ready. offline mode aktif.`, 'sys');
+    print('[+] semua inference lokal — tidak ada data keluar.', 'dim');
+  } catch (e) {
+    print('[!] load gagal: ' + (e?.message || e), 'err');
+  }
+}
+
+/* ---------- commands ---------- */
+async function runCommand(cmd) {
+  const [name, ...rest] = cmd.trim().split(/\s+/);
+  const arg = rest.join(' ');
+
+  switch (name) {
+    case '/help':
+      print('commands:', 'sys');
+      print('  /model             — daftar model', 'dim');
+      print('  /model <key>       — load model', 'dim');
+      print('  /offline           — status koneksi & engine', 'dim');
+      print('  /clear             — hapus layar', 'dim');
+      print('  /wipe              — hapus history + cache', 'dim');
+      print('  /sys <prompt>      — set system prompt', 'dim');
+      print('  /exit              — bersihkan tampilan (bukan keluar)', 'dim');
+      print('  ketik apapun tanpa / untuk chat', 'dim');
+      return;
+
+    case '/model': {
+      if (!arg) {
+        print('available models:', 'sys');
+        for (const [k, v] of Object.entries(MODELS)) {
+          print(`  ${k.padEnd(10)} ${v.label.padEnd(16)} ${v.size}`, 'dim');
+        }
+        print(`current: ${currentModel || 'none'}`, currentModel ? 'sys' : 'warn');
+        return;
+      }
+      await loadModel(arg);
+      return;
+    }
+
+    case '/offline': {
+      print('net: ' + (navigator.onLine ? 'ONLINE' : 'OFFLINE'), navigator.onLine ? 'warn' : 'sys');
+      print('engine: ' + (engine ? 'ready (' + currentModel + ')' : 'cold'), engine ? 'sys' : 'warn');
+      print('webgpu: ' + (navigator.gpu ? 'available' : 'missing'), navigator.gpu ? 'sys' : 'err');
+      print('telemetry: none', 'sys');
+      if (engine) print('tip: matiin wifi/data. engine tetap jalan dari cache.', 'dim');
+      return;
+    }
+
+    case '/clear':
+      screenEl.innerHTML = '';
+      return;
+
+    case '/wipe':
+      if (!confirm('hapus history + reset?')) { print('aborted.', 'dim'); return; }
+      history = []; saveHistory();
+      if ('caches' in self) {
+        const keys = await caches.keys();
+        for (const k of keys) await caches.delete(k);
+      }
+      localStorage.clear();
+      print('[+] history + cache dihapus. reload halaman.', 'sys');
+      return;
+
+    case '/sys':
+      if (!arg) { print('usage: /sys <prompt>', 'warn'); return; }
+      window.__sysOverride = arg;
+      print('[+] system prompt set.', 'sys');
+      return;
+
+    case '/exit':
+      screenEl.innerHTML = '';
+      print('anon-term v2.4 — offline', 'sys');
+      return;
+  }
+
+  // bukan command → kirim ke model
+  if (!engine) { print('[!] model belum di-load. ketik: /model qwen1.5b', 'err'); return; }
+  if (busy) { print('[!] masih proses...', 'warn'); return; }
+
+  busy = true;
+  history.push({ role: 'user', content: cmd });
+  saveHistory();
+
+  // output bubble (streaming)
+  const bubble = document.createElement('span');
+  bubble.className = 'line ai';
+  bubble.textContent = '';
+  screenEl.appendChild(bubble);
+  scroll();
+
+  const sys = window.__sysOverride || SYS;
+  const msgs = [{ role: 'system', content: sys }, ...history.slice(-20)];
+
+  let acc = '';
+  try {
+    const stream = await engine.chat.completions.create({
+      messages: msgs,
+      stream: true,
+      temperature: 0.8,
+      top_p: 0.95,
+      max_tokens: 1024,
+    });
+    for await (const chunk of stream) {
+      const d = chunk.choices[0]?.delta?.content || '';
+      if (d) {
+        acc += d;
+        bubble.textContent = acc + '\n';
+        scroll();
+      }
+    }
+    if (!acc) bubble.textContent = '[empty response]\n';
+  } catch (e) {
+    bubble.className = 'line err';
+    bubble.textContent = 'error: ' + (e?.message || e) + '\n';
+  }
+
+  history.push({ role: 'assistant', content: acc });
+  saveHistory();
+  busy = false;
+}
+
+/* ---------- input wiring ---------- */
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+});
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    const v = inputEl.value.trim();
+    if (!v) return;
+    inputEl.value = ''; inputEl.style.height = 'auto';
+    promptUser(v);
+    runCommand(v);
+  }
+});
+
+document.querySelectorAll('#kbd button').forEach(b => {
+  b.addEventListener('click', () => {
+    const cmd = b.dataset.cmd;
+    promptUser(cmd);
+    runCommand(cmd);
+  });
+});
+
+/* ---------- HUD ---------- */
+function hudRefresh() {
+  hud.net.textContent = 'net:' + (navigator.onLine ? 'ON' : 'OFF');
+  hud.gpu.textContent = 'gpu:' + (navigator.gpu ? 'ok' : 'none');
+}
+addEventListener('online', hudRefresh);
+addEventListener('offline', hudRefresh);
+
+/* ---------- rehydrate history (tanpa tampil) ---------- */
+// history disimpan, tapi tidak di-print ke layar (terminal bersih saat reload)
+
+/* ---------- init ---------- */
+(async () => {
+  hudRefresh();
+  await playBoot();
+  print('anon-term v2.4 — offline llm shell', 'sys');
+  print('ketik /help untuk perintah. /model qwen1.5b untuk mulai.', 'dim');
+  print('');
+  inputEl.focus();
+})();
+
+window.addEventListener('resize', scroll);
+</script>
+</body>
+</html>
